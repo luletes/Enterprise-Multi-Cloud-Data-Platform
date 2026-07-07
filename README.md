@@ -29,3 +29,15 @@ docker build -t aviation-extractor .
 
 # Run the automated telemetry pipeline container
 docker run -v \$(pwd)/data_lake:/app/data_lake aviation-extractor
+## ❄️ Enterprise Snowflake Analytics Query
+This production window function isolates the absolute latest chronological telemetry update for every distinct active aircraft in the warehouse, filtering out obsolete transponder pings:
+
+```sql
+SELECT icao24_id, flight_callsign, velocity_mph, baro_altitude
+FROM (
+SELECT *,
+ROW_NUMBER() OVER (PARTITION BY icao24_id ORDER BY time_position DESC) as rn
+FROM gold_aviation_flights
+)
+WHERE rn = 1;
+```
