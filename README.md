@@ -1,43 +1,62 @@
-# Enterprise Multi-Cloud Data Engineering Platform
-Developed by Luel Gebreselassie | Technical Data Engineer
-An end-to-end cloud data pipeline engineered to ingest, process, and store live global aviation transponder logs in real time. This platform bridges production software infrastructure with high-level corporate business intelligence.
+import os
+from datetime import datetime
 
-## 🏗️ Platform System Architecture
-The pipeline is designed using a modern decoupled data lakehouse framework:
-1. **Extraction (Python & Docker):** A containerized Python application connects to live aerospace API telemetry streams to extract real-time aircraft coordinates, velocities, and altitudes.
-2. **Orchestration (Apache Airflow):** Automates chronological task dependencies and schedules daily workflows directly into an enterprise storage landing zone.
-3. **Processing (Azure Databricks & Spark):** Implements a Medallion Architecture (Bronze -> Silver -> Gold layers) using PySpark to clean, filter, and structure massive, messy logs.
-4. **Warehousing (Snowflake):** Loads highly optimized relational data tables to handle low-latency analytics query tracking.
-5. **Analytics (Power BI):** Connects reporting suites directly to the warehouse layer via DirectQuery to deliver live operational flight logistics dashboards.
+import pandas as pd
+import requests
 
-## 🛠️ Tech Stack & Tool Grid
-* **Languages:** Python, SQL, PySpark
-* **Cloud Infrastructure:** Microsoft Azure (Blob Storage, Data Factory)
-* **Data Processing & Lakehouse:** Azure Databricks, Apache Spark, Snowflake
-* **Workflow Automation & Containers:** Apache Airflow, Docker, Docker Compose
-* **Business Intelligence:** Microsoft Power BI
+API_URL = "https://opensky-network.org/api/states/all"
+MS_TO_MPH = 2.23694
+MAX_RECORDS = 1000
 
-## 🚀 Getting Started Locally
-To spin up this data pipeline container inside your local environment, ensure you have Docker installed and run the following terminal sequences:
+COLUMNS = [
+    "icao24_id", "flight_callsign", "origin_country", "time_position",
+    "last_contact", "longitude", "latitude", "baro_altitude_m",
+    "on_ground", "velocity_mph", "true_track", "vertical_rate",
+]
 
-```bash
-# Clone the enterprise data platform repository
-git clone https://github.com
 
-# Build the custom Python data extraction image
-docker build -t aviation-extractor .
+def fetch_live_flights():
+    """Pull a snapshot of live aircraft state vectors from the OpenSky API."""
+    print(f"[{datetime.now()}] Connecting to OpenSky Network API...")
+    try:
+        response = requests.get(API_URL, timeout=30)
+        response.raise_for_status()
+        states = response.json().get("states") or []
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"API error: {e}")
+        return None
+    if not states:
+        print("No active flight data found.")
+        return None
+    print(f"Ingested {len(states)} raw aircraft records.")
+    return states
 
-# Run the automated telemetry pipeline container
-docker run -v \$(pwd)/data_lake:/app/data_lake aviation-extractor
-## ❄️ Enterprise Snowflake Analytics Query
-This production window function isolates the absolute latest chronological telemetry update for every distinct active aircraft in the warehouse, filtering out obsolete transponder pings:
 
-```sql
-SELECT icao24_id, flight_callsign, velocity_mph, baro_altitude
-FROM (
-SELECT *,
-ROW_NUMBER() OVER (PARTITION BY icao24_id ORDER BY time_position DESC) as rn
-FROM gold_aviation_flights
-)
-WHERE rn = 1;
-```
+def clean(raw_states):
+    """Structure raw records, convert units, and apply basic quality checks."""
+    rows = [list(s[:12]) for s in raw_states[:MAX_RECORDS]]
+    df = pd.DataFrame(rows, columns=COLUMNS)
+
+    df["flight_callsign"] = df["flight_callsign"].str.strip().replace("", None)
+    df["velocity_mph"] = df["velocity_mph"] * MS_TO_MPH  # API returns m/s
+
+    before = len(df)
+    df = df.dropna(subset=["icao24_id", "latitude", "longitude"])
+    df = df[df["latitude"].between(-90, 90) & df["longitude"].between(-180, 180)]
+    df = df.drop_duplicates(subset=["icao24_id", "time_position"])
+    print(f"Quality checks removed {before - len(df)} of {before} records.")
+    return df
+
+
+def save(df):
+    output_dir = "data_lake/landing_zone"
+    os.makedirs(output_dir, exist_ok=True)
+    path = f"{output_dir}/flights_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    df.to_csv(path, index=False)
+    print(f"[{datetime.now()}] Saved {len(df)} records to {path}")
+
+
+if __name__ == "__main__":
+    raw = fetch_live_flights()
+    if raw:
+        save(clean(raw))
